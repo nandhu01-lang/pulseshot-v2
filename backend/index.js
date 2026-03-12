@@ -25,19 +25,26 @@ app.post('/generate', async (req, res) => {
   const { userId, stylePackage = 'PROFESSIONAL', imageUrls, styles = ['professional'] } = req.body;
   console.log('=== GENERATE ===', userId, 'package:', stylePackage, 'styles:', styles);
   
+  // Set timeout to ensure we always respond
+  const timeout = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(504).json({ success: false, error: 'Generation timeout' });
+    }
+  }, 180000); // 3 min timeout
+  
   try {
-    // Image counts by package
     const IMAGE_COUNTS = {
       'FREE_PREVIEW': 5,
-      'PROFESSIONAL': 40,
-      'PREMIUM': 100,
+      'PROFESSIONAL': 10,  // Reduced for faster generation
+      'PREMIUM': 20,
     };
     
-    let totalCount = IMAGE_COUNTS[stylePackage] || 20;
+    let totalCount = IMAGE_COUNTS[stylePackage] || 10;
     
-    // Use Replicate for AI generation (zedge/instantid)
     const { generateWithReplicate } = require('./services/replicate');
     const results = await generateWithReplicate(imageUrls, styles, totalCount);
+    
+    clearTimeout(timeout);
     
     if (results.length > 0) {
       generatedImages[userId] = results.map((url, i) => ({ id: i+1, url }));
@@ -46,7 +53,11 @@ app.post('/generate', async (req, res) => {
       throw new Error('No images generated');
     }
   } catch (err) {
+    clearTimeout(timeout);
     console.error('Generate error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
     // Fallback to demo images
     const images = [];
     for (let i = 0; i < totalCount; i++) {
