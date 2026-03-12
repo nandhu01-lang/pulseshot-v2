@@ -86,8 +86,62 @@ const ALL_PROMPTS = Object.keys(PROMPTS);
 // Negative prompt
 const NEGATIVE_PROMPT = "blurry, low quality, distorted face, deformed, ugly, bad anatomy, extra fingers, watermark, text, logo, cartoon, painting, illustration, 3d render, cgi, plastic skin, over-smoothed, ASA, bad eyes, asymmetrical, halos, double face, same pose, duplicate";
 
+// Generate a single image with Replicate
+async function generateSingleImage(faceImage, prompt, seed) {
+  try {
+    const response = await axios.post('https://api.replicate.com/v1/predictions', {
+      version: MODEL_VERSION,
+      input: {
+        input_image: faceImage,
+        prompt: prompt,
+        negative_prompt: NEGATIVE_PROMPT,
+        num_outputs: 1,
+        guidance_scale: 7.5,
+        num_inference_steps: 25, // Reduced for speed
+        identitynet_strength_ratio: 0.9,
+        ip_adapter_scale: 0.8,
+        enhance_nonface_region: true,
+        instantid_canny_strength: 0.3,
+        instantid_depth_strength: 0.8,
+        seed: seed,
+      }
+    }, {
+      headers: { 'Authorization': `Token ${REPLICATE_TOKEN}` },
+      timeout: 120000 // 2 minute timeout per image
+    });
+
+    const predictionId = response.data.id;
+    
+    // Poll for result - max 60 attempts x 2 seconds = 2 minutes
+    for (let attempt = 0; attempt < 60; attempt++) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const status = await axios.get(`https://api.replicate.com/v1/predictions/${predictionId}`, {
+          headers: { 'Authorization': `Token ${REPLICATE_TOKEN}` },
+          timeout: 10000
+        });
+        
+        if (status.data.status === 'succeeded') {
+          return status.data.output?.output_paths?.[0];
+        } else if (status.data.status === 'failed') {
+          console.error(`   ❌ Failed:`, status.data.error);
+          return null;
+        }
+      } catch (e) {
+        // Continue polling
+      }
+    }
+    return null;
+  } catch (err) {
+    console.error(`   ❌ Error:`, err.message);
+    return null;
+  }
+}
+
 async function generateWithReplicate(imageUrls, styleKeys, totalCount) {
-  if (!REPLICATE_TOKEN) throw new Error('REPLICATE_TOKEN not configured');
+  if (!REPLICATE_TOKEN) {
+    throw new Error('REPLICATE_TOKEN not configured');
+  }
 
   const faceImage = imageUrls[0];
   const results = [];
@@ -97,71 +151,32 @@ async function generateWithReplicate(imageUrls, styleKeys, totalCount) {
   
   // Generate each image with a different prompt for variety
   for (let i = 0; i < totalCount; i++) {
-    // Cycle through styles and add variations
     const baseStyle = styleKeys[i % styleKeys.length];
-    const variation = (i % 3) + 1; // 1, 2, or 3
+    const variation = (i % 3) + 1;
     
-    // Try to find a matching prompt with variation
     let promptKey = `${baseStyle}_${variation}`;
     if (!PROMPTS[promptKey]) {
-      // Fallback to base style or random prompt
       promptKey = ALL_PROMPTS[i % ALL_PROMPTS.length];
     }
     
     const prompt = PROMPTS[promptKey];
+    const seed = Math.floor(Math.random() * 1000000);
     
     console.log(`🎬 ${i+1}/${totalCount}: ${promptKey}`);
     
-    try {
-      // Start prediction with random seed for variety
-      const response = await axios.post('https://api.replicate.com/v1/predictions', {
-        version: MODEL_VERSION,
-        input: {
-          input_image: faceImage,
-          prompt: prompt,
-          negative_prompt: NEGATIVE_PROMPT,
-          num_outputs: 1,
-          guidance_scale: 7.5,
-          num_inference_steps: 30,
-          identitynet_strength_ratio: 0.9,  // High for face accuracy
-          ip_adapter_scale: 0.8,
-          enhance_nonface_region: true,
-          instantid_canny_strength: 0.3,
-          instantid_depth_strength: 0.8,
-          seed: Math.floor(Math.random() * 1000000),  // Random seed for variety
-        }
-      }, {
-        headers: { 'Authorization': `Token ${REPLICATE_TOKEN}` }
-      });
-
-      const predictionId = response.data.id;
-      
-      // Poll for result
-      let result = null;
-      for (let attempt = 0; attempt < 60 && !result; attempt++) {
-        await new Promise(r => setTimeout(r, 2000));
-        try {
-          const status = await axios.get(`https://api.replicate.com/v1/predictions/${predictionId}`, {
-            headers: { 'Authorization': `Token ${REPLICATE_TOKEN}` }
-          });
-          
-          if (status.data.status === 'succeeded') {
-            result = status.data.output;
-            console.log(`   ✅ Success!`);
-          } else if (status.data.status === 'failed') {
-            console.error(`   ❌ Failed:`, status.data.error);
-            break;
-          }
-        } catch (e) {
-          console.log(`   ⏳ Waiting...`);
-        }
+    const imageUrl = await generateSingleImage(faceImage, prompt, seed);
+    
+    if (imageUrl) {
+      results.push(imageUrl);
+      console.log(`   ✅ Success!`);
+    } else {
+      console.log(`   ⚠️ Failed, trying fallback...`);
+      // Try one more time with different seed
+      const fallbackUrl = await generateSingleImage(faceImage, prompt, seed + 1);
+      if (fallbackUrl) {
+        results.push(fallbackUrl);
+        console.log(`   ✅ Fallback success!`);
       }
-
-      if (result?.output_paths) {
-        results.push(...result.output_paths);
-      }
-    } catch (err) {
-      console.error(`   ❌ Error:`, err.message);
     }
   }
 
